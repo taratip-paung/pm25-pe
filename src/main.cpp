@@ -79,7 +79,7 @@ TFT_eSprite sprite = TFT_eSprite(&tft);
 // ===================== PMS9103M Serial =====================
 #define PMS_RX_PIN 18  // ESP32 RX ← PMS TXD
 #define PMS_TX_PIN 17  // ESP32 TX → PMS RXD
-#define PMS_SET_PIN 43 // Control sleep/wake of sensor
+#define MOSFET_GATE_PIN 1  // MOSFET Gate to control PMS power supply
 HardwareSerial pmsSerial(1);  // Use UART1
 
 // ===================== System State =====================
@@ -159,6 +159,8 @@ void enterDeepSleep(bool ultra_low_power = false);
 void enterUltraLowPowerMode();
 void shutdownAllPeripherals();
 void drawCriticalBatteryScreen();
+void turnOnPMS();
+void turnOffPMS();
 
 // ===================== Battery Reading Functions =====================
 static uint32_t readRawAvg(int n = 32) {
@@ -239,7 +241,7 @@ void shutdownAllPeripherals() {
   digitalWrite(TFT_BL, LOW);
   tft.writecommand(0x10);
   
-  digitalWrite(PMS_SET_PIN, LOW);
+  turnOffPMS();
   
   pmsSerial.end();
   
@@ -267,11 +269,22 @@ void shutdownAllPeripherals() {
     if (i == 5 || i == 6 || i == 7 || i == 8 || i == 9) continue;
     if (i >= 39 && i <= 48) continue;
     if (i == 15 || i == 38) continue;
-    if (i == PMS_RX_PIN || i == PMS_TX_PIN || i == PMS_SET_PIN) continue;
+    if (i == PMS_RX_PIN || i == PMS_TX_PIN || i == MOSFET_GATE_PIN) continue;
     pinMode(i, INPUT);
   }
   
 
+}
+
+// ===================== PMS Power Control Functions =====================
+void turnOnPMS() {
+  digitalWrite(MOSFET_GATE_PIN, HIGH);
+  delay(100);
+}
+
+void turnOffPMS() {
+  digitalWrite(MOSFET_GATE_PIN, LOW);
+  delay(100);
 }
 
 // ===================== Enhanced Deep Sleep Functions =====================
@@ -366,7 +379,7 @@ void evaluateBatteryProtection() {
 }
 
 void forceLowBatterySafeState() {
-  digitalWrite(PMS_SET_PIN, LOW);
+  turnOffPMS();
   dataReady = false;
   bufferIndex = 0;
   
@@ -475,7 +488,7 @@ void IRAM_ATTR buttonISR() {
 
 // ===================== PMS Sensor Functions =====================
 bool checkPMSSensor() {
-  digitalWrite(PMS_SET_PIN, HIGH);
+  turnOnPMS();
   delay(2000);
   
   while (pmsSerial.available()) pmsSerial.read();
@@ -496,7 +509,7 @@ bool checkPMSSensor() {
     delay(10);
   }
   
-  digitalWrite(PMS_SET_PIN, LOW);
+  turnOffPMS();
   return false;
 }
 
@@ -651,7 +664,7 @@ void enterSleepMode() {
   digitalWrite(TFT_BL, LOW);
   tft.fillScreen(TFT_BLACK);
   
-  digitalWrite(PMS_SET_PIN, LOW);
+  turnOffPMS();
   
   if (wifiConnected) {
     WiFi.disconnect(true);
@@ -694,7 +707,7 @@ void wakeFromSleep() {
   }
   
   if (pmsConnected) {
-    digitalWrite(PMS_SET_PIN, HIGH);
+    turnOnPMS();
     pmsWarmupStart = millis();
     pmsWarmedUp = false;
     waitingForWarmup = true;
@@ -1034,15 +1047,15 @@ void setup() {
   
   Serial.println("[BOOT] Serial init...");
   pmsSerial.begin(9600, SERIAL_8N1, PMS_RX_PIN, PMS_TX_PIN);
-  pinMode(PMS_SET_PIN, OUTPUT);
-  digitalWrite(PMS_SET_PIN, LOW);
+  pinMode(MOSFET_GATE_PIN, OUTPUT);
+  turnOffPMS();
 
   if (!lowBatteryMode) {
     Serial.println("[BOOT] Checking PMS sensor...");
     pmsConnected = checkPMSSensor();
     if (pmsConnected) {
       Serial.println("[BOOT] PMS sensor OK");
-      digitalWrite(PMS_SET_PIN, LOW);
+      turnOffPMS();
     } else {
       Serial.println("[BOOT] PMS sensor NOT connected");
     }
@@ -1073,7 +1086,7 @@ void setup() {
   
   // Start sensor if connected
   if (pmsConnected) {
-    digitalWrite(PMS_SET_PIN, HIGH);
+    turnOnPMS();
     pmsWarmupStart = millis();
     pmsWarmedUp = false;
     waitingForWarmup = true;
