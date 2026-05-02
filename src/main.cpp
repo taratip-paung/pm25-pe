@@ -1,9 +1,4 @@
-#include <Arduino.h>
-
-// ปิดคำเตือนเรื่องทัช (บอร์ดนี้ไม่มีทัช)
-#ifndef TOUCH_CS
-#define TOUCH_CS -1
-#endif
+﻿#include <Arduino.h>
 
 #include <TFT_eSPI.h>
 #include <HardwareSerial.h>
@@ -20,15 +15,20 @@
 #include "driver/rtc_io.h"
 
 // ===================== Buttons =====================
-#define BUTTON_1 35  // ปุ่มบน (GPIO35) [RTC IO, ไม่มี internal pull-up]
-#define BUTTON_2 0   // ปุ่มล่าง (GPIO0)  [RTC IO, มี internal pull-up และเป็นปุ่ม BOOT]
+#define BUTTON_1 14  // T-Display S3 onboard button (GPIO14)
+#define BUTTON_2 0   // BOOT button (GPIO0)
 
 // *** Deep sleep wake ***
-#define WAKE_MASK  (1ULL << GPIO_NUM_0)   // ใช้ GPIO0 เป็น wake source
-#define WAKE_MODE  ESP_EXT1_WAKEUP_ALL_LOW // ตื่นเมื่อกดปุ่ม (LOW)
+#define WAKE_MASK  (1ULL << GPIO_NUM_0)
+#if CONFIG_IDF_TARGET_ESP32
+#define WAKE_MODE  ESP_EXT1_WAKEUP_ALL_LOW
+#elif CONFIG_IDF_TARGET_ESP32S3
+#define WAKE_MODE  ESP_EXT1_WAKEUP_ANY_LOW
+#endif
 
 // ===================== Battery ADC Configuration =====================
-static const int   PIN_VBAT   = 34;     // จุดวัดแบตผ่านตัวแบ่งแรงดัน
+static const int   PIN_VBAT   = 4;      // T-Display S3 battery voltage pin (GPIO4)
+#define DISPLAY_POWER_PIN 15             // Must be HIGH to enable display on battery
 static const float DIVIDER    = 2.0f;   // เช่น 100k/100k => x2
 static const float VREF_mV    = 1100;   // สำหรับ esp_adc_cal
 static const float CAL        = 0.99f;  // fine-tune จาก DMM
@@ -48,13 +48,13 @@ static constexpr adc_atten_t CAL_ATTEN = ADC_ATTEN_DB_12;
 #define ULTRA_LOW_POWER_INTERVAL_US (60 * 60 * 1000000ULL)  // 60 นาที
 
 // ===================== WiFi =====================
-const char* WIFI_SSID = "PM25";
-const char* WIFI_PASSWORD = "00000000";
+const char* WIFI_SSID = "KHomeSmart-IOT";
+const char* WIFI_PASSWORD = "nongnoom";
 
-// ===================== ThingsBoard =====================
-const char* TB_SERVER = "tb4.rtk-landmos.com";
-const int   TB_PORT   = 443;  // HTTPS
-const char* TB_TOKEN  = "LbFaT8SHI2qH9ux1E3R3";
+// ===================== GIST North API =====================
+const char* GIST_SERVER = "app.gistnorth.soc.cmu.ac.th";
+const char* GIST_TOKEN  = "dust_c9230016d168863c7fe1c479ef8e09889c935e923c91e759";
+const char* GIST_PATH   = "/iot/api/ingest";
 const char* DEVICE_NAME = "PM25-PE-2";
 
 // ===================== Time / NTP (UTC+7) =====================
@@ -62,24 +62,35 @@ const long GMT_OFFSET_SEC = 7 * 3600;
 const int  DAYLIGHT_OFFSET_SEC = 0;
 
 // ===================== Telemetry Interval =====================
-const unsigned long SEND_INTERVAL = 60000;  // ส่งทุก 60 วินาที
+const unsigned long SEND_INTERVAL = 3000;
 
 // ===================== Sensor Timing =====================
 const unsigned long PMS_WARMUP_TIME = 30000;     // รอ 30 วินาทีหลังเปิดเซ็นเซอร์
-const unsigned long AUTO_SLEEP_TIME = 120000;    // Auto sleep หลัง 2 นาที
-const unsigned long PMS_READ_INTERVAL = 5000;    // อ่านทุก 5 วินาที (หลัง warmup)
+const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 นาที (60 วินาที)
+const unsigned long PMS_READ_INTERVAL = 3000;     // อ่านทุก 3 วินาที (หลัง warmup)
+
+// ===================== PM Calibration Configuration =====================
+// Calibration formula: calibrated_value = factor × raw_value + offset
+
+// PM2.5 Calibration Parameters
+#define PM25_CALIBRATION_FACTOR    1.0f    // Default: ไม่ปรับค่า
+#define PM25_CALIBRATION_OFFSET    0.0f    // Default: ไม่ปรับค่า
+
+// PM10 Calibration Parameters
+#define PM10_CALIBRATION_FACTOR    1.0f    // Default: ไม่ปรับค่า
+#define PM10_CALIBRATION_OFFSET    0.0f    // Default: ไม่ปรับค่า
 
 // ===================== Display =====================
 TFT_eSPI tft;
 TFT_eSprite sprite = TFT_eSprite(&tft);
 #ifndef TFT_BL
-  #define TFT_BL 4
+  #define TFT_BL 38
 #endif
 
 // ===================== PMS9103M Serial =====================
-#define PMS_RX_PIN 13  // ESP32 RX ← PMS TXD
+#define PMS_RX_PIN 18  // ESP32 RX ← PMS TXD
 #define PMS_TX_PIN 17  // ESP32 TX → PMS RXD
-#define PMS_SET_PIN 2  // Control sleep/wake of sensor
+#define PMS_SET_PIN 43 // Control sleep/wake of sensor
 HardwareSerial pmsSerial(1);  // Use UART1
 
 // ===================== System State =====================
@@ -154,11 +165,31 @@ uint16_t getBatteryColor(int percent);
 void updateDisplay();
 void drawLowBatteryScreen();
 void handleButtonPress();
-void sendToThingsBoard();
+void sendToGistNorth();
 void enterDeepSleep(bool ultra_low_power = false);
 void enterUltraLowPowerMode();
 void shutdownAllPeripherals();
 void drawCriticalBatteryScreen();
+uint16_t calibratePM(uint16_t rawValue, float factor, float offset);
+uint16_t getCalibratedPM25();
+uint16_t getCalibratedPM10();
+
+// ===================== PM Calibration Functions =====================
+uint16_t calibratePM(uint16_t rawValue, float factor, float offset) {
+  float calibrated = (factor * rawValue) + offset;
+  // Clamp values to valid range (0 - 9999)
+  if (calibrated < 0.0f) return 0;
+  if (calibrated > 9999.0f) return 9999;
+  return (uint16_t)calibrated;
+}
+
+uint16_t getCalibratedPM25() {
+  return calibratePM(pmsData.pm2_5_atm, PM25_CALIBRATION_FACTOR, PM25_CALIBRATION_OFFSET);
+}
+
+uint16_t getCalibratedPM10() {
+  return calibratePM(pmsData.pm10_atm, PM10_CALIBRATION_FACTOR, PM10_CALIBRATION_OFFSET);
+}
 
 // ===================== Battery Reading Functions =====================
 static uint32_t readRawAvg(int n = 32) {
@@ -172,9 +203,9 @@ static uint32_t readRawAvg(int n = 32) {
 
 float readVBat() {
   uint32_t raw = readRawAvg(32);
-  uint32_t mv  = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
-  float vbat = (mv / 1000.0f) * DIVIDER;
-  return vbat * CAL;
+  // Simple calculation: raw * 1100mV / 4095 * divider * cal
+  float vbat = (raw * 1100.0f / 4095.0f) * DIVIDER * CAL;
+  return vbat;
 }
 
 // USB detection with hysteresis
@@ -235,19 +266,14 @@ int smoothSOC(int soc_new) {
 
 // ===================== Shutdown All Peripherals =====================
 void shutdownAllPeripherals() {
-  Serial.println("DEBUG: Shutting down all peripherals...");
-  
-  // ปิดจอและ backlight
+
   digitalWrite(TFT_BL, LOW);
-  tft.writecommand(0x10);  // Sleep command for display
+  tft.writecommand(0x10);
   
-  // ปิดเซ็นเซอร์ PMS
   digitalWrite(PMS_SET_PIN, LOW);
   
-  // ปิด Serial ports
   pmsSerial.end();
   
-  // ปิด WiFi และ Bluetooth อย่างสมบูรณ์
   if (WiFi.getMode() != WIFI_OFF) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -255,48 +281,47 @@ void shutdownAllPeripherals() {
   esp_wifi_stop();
   esp_wifi_deinit();
   
-  // ปิด Bluetooth
+#if CONFIG_IDF_TARGET_ESP32
   esp_bt_controller_disable();
   esp_bt_controller_deinit();
   esp_bt_mem_release(ESP_BT_MODE_BTDM);
+#endif
   
-  // ปิด ADC power (commented out deprecated function)
-  // adc_power_off() is deprecated in newer ESP-IDF
-  // For ESP32, we can use adc_power_release() or just leave ADC in low power
-  // adc_power_release();  // This also might not be available in all versions
+  analogRead(PIN_VBAT);
+  pinMode(PIN_VBAT, INPUT);
   
-  // Alternative: Just de-init the ADC pins to save power
-  analogRead(PIN_VBAT);  // One last read to ensure ADC is initialized
-  pinMode(PIN_VBAT, INPUT);  // Set to high impedance input
-  
-  // ตั้งค่า GPIO ที่ไม่ใช้เป็น INPUT เพื่อประหยัดพลังงาน
-  for (int i = 0; i < 34; i++) {
-    if (i != BUTTON_2 && i != 6 && i != 7 && i != 8 && i != 11) {
-      pinMode(i, INPUT);
-    }
+  for (int i = 0; i < 49; i++) {
+    if (i == 0 || i == 3 || i == 45 || i == 46) continue;
+    if (i == 19 || i == 20) continue;
+    if (i >= 26 && i <= 37) continue;
+    if (i == BUTTON_2 || i == BUTTON_1) continue;
+    if (i == 5 || i == 6 || i == 7 || i == 8 || i == 9) continue;
+    if (i >= 39 && i <= 48) continue;
+    if (i == 15 || i == 38) continue;
+    if (i == PMS_RX_PIN || i == PMS_TX_PIN || i == PMS_SET_PIN) continue;
+    pinMode(i, INPUT);
   }
   
-  Serial.println("DEBUG: All peripherals shutdown complete");
+
 }
 
 // ===================== Enhanced Deep Sleep Functions =====================
 void configureDeepSleepWake(bool include_timer = false, uint64_t timer_us = BATTERY_CHECK_INTERVAL_US) {
-  // Clear all wakeup sources first
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   
-  // Configure button wake (GPIO0)
   pinMode(BUTTON_2, INPUT_PULLUP);
+#if CONFIG_IDF_TARGET_ESP32
   esp_sleep_enable_ext1_wakeup(WAKE_MASK, WAKE_MODE);
+#elif CONFIG_IDF_TARGET_ESP32S3
+  esp_sleep_enable_ext1_wakeup(WAKE_MASK, WAKE_MODE);
+#endif
   
-  // Optionally add timer wakeup
   if (include_timer) {
     esp_sleep_enable_timer_wakeup(timer_us);
-    Serial.printf("DEBUG: Timer wakeup set for %llu seconds\n", timer_us / 1000000ULL);
   }
   
-  // Configure power domains
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
-  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_ON);  // Keep for RTC
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_ON);
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
   esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL, ESP_PD_OPTION_OFF);
 }
@@ -305,14 +330,11 @@ void enterDeepSleep(bool ultra_low_power) {
   shutdownAllPeripherals();
   
   if (ultra_low_power) {
-    Serial.println("DEBUG: Entering ULTRA LOW POWER deep sleep");
     configureDeepSleepWake(true, ULTRA_LOW_POWER_INTERVAL_US);
   } else {
-    Serial.println("DEBUG: Entering normal deep sleep with battery monitoring");
     configureDeepSleepWake(true, BATTERY_CHECK_INTERVAL_US);
   }
   
-  Serial.printf("DEBUG: Battery voltage before sleep: %.2fV\n", batteryVoltage);
   Serial.flush();
   delay(100);
   
@@ -320,13 +342,8 @@ void enterDeepSleep(bool ultra_low_power) {
 }
 
 void enterUltraLowPowerMode() {
-  Serial.println("DEBUG: CRITICAL BATTERY - Entering ultra low power mode!");
-  
-  // แสดงข้อความเตือนสั้นๆ
   drawCriticalBatteryScreen();
   delay(2000);
-  
-  // เข้า deep sleep แบบ ultra low power
   enterDeepSleep(true);
 }
 
@@ -347,9 +364,6 @@ void readBattery() {
     batteryPercent = smoothSOC(soc);
     evaluateBatteryProtection();
   }
-
-  Serial.printf("DEBUG: VBAT=%.2fV, SOC=%d%%, usb=%d, warn=%d, lowMode=%d, critical=%d\n",
-                batteryVoltage, batteryPercent, usbMode, lowBatteryWarn, lowBatteryMode, criticalBattery);
 }
 
 void evaluateBatteryProtection() {
@@ -360,12 +374,10 @@ void evaluateBatteryProtection() {
     return;
   }
   
-  // CRITICAL: ต่ำกว่า VBAT_CRITICAL = ultra low power mode ทันที
   if (batteryVoltage <= VBAT_CRITICAL) {
     criticalBattery = true;
-    Serial.println("CRITICAL: Battery voltage critical! Immediate shutdown required!");
     enterUltraLowPowerMode();
-    return;  // ไม่ควรมาถึงบรรทัดนี้
+    return;
   }
   
   // ตรวจสอบระดับต่างๆ
@@ -395,20 +407,15 @@ void forceLowBatterySafeState() {
     wifiConnected = false;
   }
   
-  Serial.println("DEBUG: Enter LOW BATTERY SAFE STATE");
-  
-  // แสดงหน้าจอเตือน
   drawLowBatteryScreen();
   sprite.pushSprite(0, 0);
   delay(2000);
   
-  // เข้า deep sleep พร้อม timer เพื่อเช็คแบตเป็นระยะ
   enterDeepSleep(false);
 }
 
 void maybeExitLowBatterySafeState() {
   if (!lowBatteryMode && batteryVoltage >= VBAT_RECOVER) {
-    Serial.println("DEBUG: Battery recovered, exiting safe state");
     criticalBattery = false;
   }
 }
@@ -418,23 +425,20 @@ void drawCriticalBatteryScreen() {
   sprite.fillSprite(TFT_BLACK);
   sprite.setTextDatum(MC_DATUM);
   
-  // Critical warning
   sprite.setTextColor(TFT_RED, TFT_BLACK);
   sprite.setTextFont(4);
-  sprite.drawString("CRITICAL!", 120, 30);
+  sprite.drawString("CRITICAL!", 160, 40);
   
-  // Voltage display
   sprite.setTextColor(TFT_WHITE, TFT_BLACK);
   sprite.setTextFont(4);
   char vbuf[32];
   snprintf(vbuf, sizeof(vbuf), "%.2fV", batteryVoltage);
-  sprite.drawString(vbuf, 120, 60);
+  sprite.drawString(vbuf, 160, 75);
   
-  // Message
   sprite.setTextFont(2);
   sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
-  sprite.drawString("Deep Sleep Mode", 120, 90);
-  sprite.drawString("Charge immediately!", 120, 110);
+  sprite.drawString("Deep Sleep Mode", 160, 105);
+  sprite.drawString("Charge immediately!", 160, 130);
   
   sprite.pushSprite(0, 0);
 }
@@ -445,21 +449,21 @@ void drawLowBatteryScreen() {
   
   sprite.setTextColor(TFT_RED, TFT_BLACK);
   sprite.setTextFont(4);
-  sprite.drawString("LOW BATTERY", 120, 40);
+  sprite.drawString("LOW BATTERY", 160, 45);
   
   sprite.setTextColor(TFT_WHITE, TFT_BLACK);
   sprite.setTextFont(2);
   char vbuf[32];
   snprintf(vbuf, sizeof(vbuf), "VBAT: %.2fV  (%d%%)", batteryVoltage, batteryPercent);
-  sprite.drawString(vbuf, 120, 70);
+  sprite.drawString(vbuf, 160, 80);
   
   sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
-  sprite.drawString("Charging required", 120, 95);
+  sprite.drawString("Charging required", 160, 110);
   
   sprite.setTextDatum(TR_DATUM);
   sprite.setTextFont(1);
   sprite.setTextColor(TFT_RED, TFT_BLACK);
-  sprite.drawString("WiFi OFF", 235, 5);
+  sprite.drawString("WiFi OFF", 315, 5);
   
   sprite.setTextDatum(TL_DATUM);
   sprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -467,12 +471,11 @@ void drawLowBatteryScreen() {
   
   sprite.setTextDatum(BL_DATUM);
   sprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  sprite.drawString("SAFE MODE", 5, 134);
+  sprite.drawString("SAFE MODE", 5, 168);
 }
 
 // ===================== Time Functions =====================
 void syncTime() {
-  Serial.println("DEBUG: Syncing time via NTP...");
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org", "time.nist.gov");
   
   time_t now = time(nullptr);
@@ -481,12 +484,6 @@ void syncTime() {
     delay(250);
     now = time(nullptr);
     retries++;
-  }
-  
-  if (now >= 1700000000) {
-    Serial.println("DEBUG: Time sync OK");
-  } else {
-    Serial.println("WARNING: Time sync failed");
   }
 }
 
@@ -509,8 +506,6 @@ void IRAM_ATTR buttonISR() {
 
 // ===================== PMS Sensor Functions =====================
 bool checkPMSSensor() {
-  Serial.println("DEBUG: Checking for PMS9103M sensor...");
-  
   digitalWrite(PMS_SET_PIN, HIGH);
   delay(2000);
   
@@ -525,7 +520,6 @@ bool checkPMSSensor() {
       bytesReceived++;
       if (bytesReceived > 1 && pmsBuffer[0] == 0x42 && byteIn == 0x4D) {
         while (pmsSerial.available()) pmsSerial.read();
-        Serial.println("DEBUG: PMS9103M sensor detected!");
         return true;
       }
       pmsBuffer[0] = byteIn;
@@ -533,14 +527,12 @@ bool checkPMSSensor() {
     delay(10);
   }
   
-  Serial.println("WARNING: PMS9103M sensor NOT detected");
   digitalWrite(PMS_SET_PIN, LOW);
   return false;
 }
 
 bool processPMSData() {
   if (pmsBuffer[0] != 0x42 || pmsBuffer[1] != 0x4D) {
-    Serial.println("DEBUG: Invalid header");
     return false;
   }
   
@@ -549,7 +541,6 @@ bool processPMSData() {
   uint16_t bufferChecksum = (pmsBuffer[30] << 8) | pmsBuffer[31];
   
   if (checksum != bufferChecksum) {
-    Serial.printf("DEBUG: Checksum error\n");
     return false;
   }
   
@@ -559,18 +550,19 @@ bool processPMSData() {
   pmsData.pm1_0_atm = (pmsBuffer[10] << 8) | pmsBuffer[11];
   pmsData.pm2_5_atm = (pmsBuffer[12] << 8) | pmsBuffer[13];
   pmsData.pm10_atm  = (pmsBuffer[14] << 8) | pmsBuffer[15];
-  
-  Serial.println("\n=== PMS9103M Data ===");
-  Serial.printf("PM1.0: %d µg/m³\n", pmsData.pm1_0_atm);
-  Serial.printf("PM2.5: %d µg/m³\n", pmsData.pm2_5_atm);
-  Serial.printf("PM10:  %d µg/m³\n", pmsData.pm10_atm);
-  Serial.println("=====================");
+  pmsData.particles_03  = (pmsBuffer[16] << 8) | pmsBuffer[17];
+  pmsData.particles_05  = (pmsBuffer[18] << 8) | pmsBuffer[19];
+  pmsData.particles_10  = (pmsBuffer[20] << 8) | pmsBuffer[21];
+  pmsData.particles_25  = (pmsBuffer[22] << 8) | pmsBuffer[23];
+  pmsData.particles_50  = (pmsBuffer[24] << 8) | pmsBuffer[25];
+  pmsData.particles_100 = (pmsBuffer[26] << 8) | pmsBuffer[27];
   
   return true;
 }
 
 void readPMSSensor() {
-  if (!systemActive || !pmsConnected || lowBatteryMode) return;
+  if (!systemActive || lowBatteryMode) return;
+  if (!pmsConnected) return;
   
   // ถ้ายังอยู่ในช่วง warmup ให้อ่านแต่ไม่ใช้ค่า
   if (waitingForWarmup && !pmsWarmedUp) {
@@ -599,7 +591,6 @@ void readPMSSensor() {
     bufferIndex++;
     
     if (bufferIndex >= 32) {
-      Serial.println("DEBUG: Frame received");
       if (processPMSData()) {
         dataReady = true;
         lastRead = millis();
@@ -612,34 +603,59 @@ void readPMSSensor() {
 
 // ===================== WiFi Functions =====================
 void connectWiFi() {
-  if (!systemActive || lowBatteryMode) return;
+  if (lowBatteryMode) return;
   
-  Serial.println("\nDEBUG: Connecting to WiFi...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   
   sprite.fillSprite(TFT_BLACK);
   sprite.setTextDatum(MC_DATUM);
-  sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  sprite.setTextColor(TFT_CYAN, TFT_BLACK);
   sprite.setTextFont(2);
-  sprite.drawString("Connecting WiFi...", 120, 67);
+  sprite.drawString("Connecting WiFi...", 160, 65);
+  sprite.setTextDatum(TL_DATUM);
+  sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  sprite.setTextFont(1);
+  char ssidMsg[64];
+  snprintf(ssidMsg, sizeof(ssidMsg), "SSID: %s", WIFI_SSID);
+  sprite.drawString(ssidMsg, 5, 135);
   sprite.pushSprite(0, 0);
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
-    Serial.print(".");
     attempts++;
+    Serial.printf("[WIFI] Attempt %d/20\n", attempts);
   }
   
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
-    Serial.println("\nDEBUG: WiFi connected!");
-    Serial.print("DEBUG: IP address: ");
-    Serial.println(WiFi.localIP());
+    Serial.printf("[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    
+    sprite.fillSprite(TFT_BLACK);
+    sprite.setTextDatum(MC_DATUM);
+    sprite.setTextColor(TFT_GREEN, TFT_BLACK);
+    sprite.setTextFont(3);
+    sprite.drawString("WiFi CONNECTED", 160, 50);
+    sprite.setTextFont(1);
+    sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    sprite.drawString(WiFi.localIP().toString().c_str(), 160, 85);
+    sprite.pushSprite(0, 0);
+    delay(1000);
   } else {
     wifiConnected = false;
-    Serial.println("\nWARNING: Failed to connect to WiFi");
+    Serial.println("[WIFI] Connection failed!");
+    
+    sprite.fillSprite(TFT_BLACK);
+    sprite.setTextDatum(MC_DATUM);
+    sprite.setTextColor(TFT_RED, TFT_BLACK);
+    sprite.setTextFont(3);
+    sprite.drawString("WiFi FAILED", 160, 50);
+    sprite.setTextFont(1);
+    sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    sprite.drawString("Will continue offline", 160, 85);
+    sprite.pushSprite(0, 0);
+    delay(1000);
   }
 }
 
@@ -647,11 +663,9 @@ void connectWiFi() {
 void enterSleepMode() {
   if (!systemActive) return;
   
-  Serial.println("\n=== ENTERING SLEEP MODE ===");
   systemActive = false;
   displayOn = false;
   
-  // Reset warmup flags
   pmsWarmedUp = false;
   waitingForWarmup = false;
   pmsWarmupStart = 0;
@@ -661,7 +675,7 @@ void enterSleepMode() {
   sprite.setTextDatum(MC_DATUM);
   sprite.setTextColor(TFT_BLUE, TFT_BLACK);
   sprite.setTextFont(2);
-  sprite.drawString("Sleep Mode", 120, 67);
+  sprite.drawString("Sleep Mode", 160, 85);
   sprite.pushSprite(0, 0);
   delay(400);
   
@@ -669,31 +683,25 @@ void enterSleepMode() {
   tft.fillScreen(TFT_BLACK);
   
   digitalWrite(PMS_SET_PIN, LOW);
-  Serial.println("DEBUG: PMS sensor set to sleep mode");
   
   if (wifiConnected) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     wifiConnected = false;
-    Serial.println("DEBUG: WiFi disconnected");
   }
   
   while (pmsSerial.available()) pmsSerial.read();
   
   dataReady = false;
   bufferIndex = 0;
-  
-  Serial.println("DEBUG: System in sleep mode");
-  Serial.println("===========================\n");
 }
 
 void wakeFromSleep() {
   if (systemActive) return;
   
-  Serial.println("\n=== WAKING FROM SLEEP ===");
   systemActive = true;
   displayOn = true;
-  systemWakeTime = millis();  // บันทึกเวลาที่ตื่น
+  systemWakeTime = millis();
   
   digitalWrite(TFT_BL, HIGH);
   
@@ -701,12 +709,11 @@ void wakeFromSleep() {
   sprite.setTextDatum(MC_DATUM);
   sprite.setTextColor(TFT_CYAN, TFT_BLACK);
   sprite.setTextFont(2);
-  sprite.drawString("Waking up...", 120, 67);
+  sprite.drawString("Waking up...", 160, 85);
   sprite.pushSprite(0, 0);
   
   readBattery();
   
-  // ตรวจสอบแบตเตอรี่ก่อนเริ่มทำงาน
   if (batteryVoltage <= VBAT_CRITICAL && !usbMode) {
     enterUltraLowPowerMode();
     return;
@@ -717,21 +724,26 @@ void wakeFromSleep() {
     return;
   }
   
-  // เปิดเซ็นเซอร์ PMS และเริ่ม warmup
   if (pmsConnected) {
     digitalWrite(PMS_SET_PIN, HIGH);
-    Serial.println("DEBUG: PMS sensor waking up - starting 30s warmup period");
     pmsWarmupStart = millis();
     pmsWarmedUp = false;
     waitingForWarmup = true;
     
-    // แสดงสถานะ warmup
     sprite.fillSprite(TFT_BLACK);
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
     sprite.setTextFont(2);
-    sprite.drawString("Sensor Warming Up", 120, 50);
-    sprite.drawString("Please wait 30s...", 120, 80);
+    sprite.drawString("Sensor Warming Up", 160, 65);
+    sprite.drawString("Please wait 30s...", 160, 100);
+    sprite.pushSprite(0, 0);
+  } else {
+    sprite.fillSprite(TFT_BLACK);
+    sprite.setTextDatum(MC_DATUM);
+    sprite.setTextColor(TFT_ORANGE, TFT_BLACK);
+    sprite.setTextFont(2);
+    sprite.drawString("No Sensor Connected", 160, 65);
+    sprite.drawString("System running offline", 160, 100);
     sprite.pushSprite(0, 0);
   }
   
@@ -742,9 +754,6 @@ void wakeFromSleep() {
   
   dataReady = false;
   bufferIndex = 0;
-  
-  Serial.println("DEBUG: System active");
-  Serial.println("=========================\n");
 }
 
 void handleButtonPress() {
@@ -752,7 +761,6 @@ void handleButtonPress() {
   
   unsigned long now = millis();
   if (now - lastButtonTime > DEBOUNCE_TIME) {
-    Serial.println("DEBUG: Button pressed - toggling sleep mode");
     if (systemActive) {
       enterSleepMode();
     } else {
@@ -763,59 +771,73 @@ void handleButtonPress() {
   buttonPressed = false;
 }
 
-// ===================== ThingsBoard Functions =====================
-void sendToThingsBoard() {
+// ===================== GIST North API =====================
+void sendToGistNorth() {
   if (!wifiConnected || !systemActive || lowBatteryMode) return;
-  
-  Serial.println("\nDEBUG: Sending data to ThingsBoard...");
-  
+
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient https;
-  
-  String url = String("https://") + TB_SERVER + "/api/v1/" + TB_TOKEN + "/telemetry";
-  
+
+  String url = String("https://") + GIST_SERVER + GIST_PATH;
+
   if (https.begin(client, url)) {
     https.addHeader("Content-Type", "application/json");
-    
-    StaticJsonDocument<512> doc;
-    
+    https.addHeader("Authorization", String("Bearer ") + GIST_TOKEN);
+
+    StaticJsonDocument<256> doc;
+
     if (pmsConnected && dataReady) {
-      doc["pm1_0"] = pmsData.pm1_0_atm;
-      doc["pm2_5"] = pmsData.pm2_5_atm;
-      doc["pm10"]  = pmsData.pm10_atm;
+      doc["pm25"] = (float)getCalibratedPM25();
+      doc["pm25_raw"] = (float)pmsData.pm2_5_atm;
+      doc["pm10"] = (float)getCalibratedPM10();
+      doc["pm10_raw"] = (float)pmsData.pm10_atm;
+
+      Serial.printf("[CALIBRATE] PM2.5 raw=%d -> cal=%d | PM10 raw=%d -> cal=%d\n",
+                    pmsData.pm2_5_atm, getCalibratedPM25(),
+                    pmsData.pm10_atm, getCalibratedPM10());
+
+      Serial.printf("[PMS HEX]");
+      for (int i = 0; i < 32; i++) {
+        Serial.printf(" %02X", pmsBuffer[i]);
+      }
+      Serial.println();
+    } else {
+      doc["pm25"] = 0.0;
+      doc["pm25_raw"] = 0.0;
+      doc["pm10"] = 0.0;
+      doc["pm10_raw"] = 0.0;
     }
-    
-    doc["battery_voltage"] = batteryVoltage;
-    doc["battery_percent"] = batteryPercent;
-    doc["battery_warn"]    = lowBatteryWarn;
-    doc["battery_lowmode"] = lowBatteryMode;
-    doc["battery_critical"] = criticalBattery;
-    doc["charging"]        = usbMode;
-    doc["device"]          = DEVICE_NAME;
-    doc["rssi"]            = WiFi.RSSI();
-    doc["active"]          = systemActive;
-    doc["pms_connected"]   = pmsConnected && !lowBatteryMode;
-    
+
     String jsonString;
     serializeJson(doc, jsonString);
-    
-    Serial.print("DEBUG: Sending JSON: ");
-    Serial.println(jsonString);
-    
+
+    String ts = getShortTimestamp();
+    Serial.printf("[%s] SEND -> %s | pm25=%.1f (raw=%.1f) pm10=%.1f (raw=%.1f) | ",
+                  ts.c_str(), GIST_SERVER,
+                  pmsConnected ? (float)getCalibratedPM25() : 0.0f,
+                  pmsConnected ? (float)pmsData.pm2_5_atm : 0.0f,
+                  pmsConnected ? (float)getCalibratedPM10() : 0.0f,
+                  pmsConnected ? (float)pmsData.pm10_atm : 0.0f);
+
     int httpCode = https.POST(jsonString);
-    
+
     if (httpCode > 0) {
-      Serial.printf("DEBUG: HTTP Response code: %d\n", httpCode);
+      String payload = https.getString();
+      Serial.printf("RESPONSE: %d\n", httpCode);
+      Serial.printf("FULL RESPONSE: %s\n", payload.c_str());
+      
       if (httpCode == HTTP_CODE_OK || httpCode == 200) {
-        Serial.println("DEBUG: Data sent successfully!");
-        lastSuccessSend = getShortTimestamp();
+        lastSuccessSend = ts;
       }
     } else {
-      Serial.printf("ERROR: HTTP request failed: %s\n", https.errorToString(httpCode).c_str());
+      Serial.printf("ERROR: %s\n", https.errorToString(httpCode).c_str());
     }
-    
+
     https.end();
+  } else {
+    Serial.printf("[%s] SEND FAILED: cannot connect to %s\n",
+                  getShortTimestamp().c_str(), GIST_SERVER);
   }
 }
 
@@ -857,16 +879,14 @@ void updateDisplay() {
   
   sprite.fillSprite(TFT_BLACK);
   
-  // ถ้าไม่มีเซ็นเซอร์ PMS
   if (!pmsConnected) {
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_ORANGE, TFT_BLACK);
     sprite.setTextFont(4);
-    sprite.drawString("NO PMS", 120, 50);
+    sprite.drawString("NO PMS", 160, 60);
     sprite.setTextFont(2);
-    sprite.drawString("Sensor Not Connected", 120, 85);
+    sprite.drawString("Sensor Not Connected", 160, 95);
   } 
-  // ถ้ากำลัง warmup
   else if (waitingForWarmup && !pmsWarmedUp) {
     unsigned long elapsed = (millis() - pmsWarmupStart) / 1000;
     unsigned long remaining = (PMS_WARMUP_TIME / 1000) - elapsed;
@@ -874,179 +894,180 @@ void updateDisplay() {
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
     sprite.setTextFont(4);
-    sprite.drawString("WARMING UP", 120, 40);
+    sprite.drawString("WARMING UP", 160, 45);
     
     sprite.setTextFont(6);
     sprite.setTextColor(TFT_CYAN, TFT_BLACK);
     char countdown[10];
     snprintf(countdown, sizeof(countdown), "%lu", remaining);
-    sprite.drawString(countdown, 120, 70);
+    sprite.drawString(countdown, 160, 80);
     
     sprite.setTextFont(2);
     sprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    sprite.drawString("seconds remaining", 120, 105);
+    sprite.drawString("seconds remaining", 160, 120);
   }
-  // แสดงค่า PM2.5 ปกติ
   else if (dataReady) {
-    uint16_t color = getColorForPM25(pmsData.pm2_5_atm);
+    uint16_t calibratedPM25 = getCalibratedPM25();
+    uint16_t calibratedPM10 = getCalibratedPM10();
+    uint16_t color = getColorForPM25(calibratedPM25);
+
+    static uint16_t lastRawPM25 = 0xFFFF;
+    static uint16_t lastRawPM10 = 0xFFFF;
+
+    if (pmsData.pm2_5_atm != lastRawPM25 || pmsData.pm10_atm != lastRawPM10) {
+      Serial.printf("[PM_DATA] PM2.5 raw=%d -> cal=%d | PM10 raw=%d -> cal=%d\n",
+                    pmsData.pm2_5_atm, calibratedPM25,
+                    pmsData.pm10_atm, calibratedPM10);
+      lastRawPM25 = pmsData.pm2_5_atm;
+      lastRawPM10 = pmsData.pm10_atm;
+    }
     
     sprite.setTextDatum(ML_DATUM);
     sprite.setTextColor(color, TFT_BLACK);
-    String pm25str = String(pmsData.pm2_5_atm);
+    String pm25str = String(calibratedPM25);
     if (pm25str.length() <= 2)      sprite.setTextFont(8);
     else if (pm25str.length() == 3) sprite.setTextFont(7);
     else                            sprite.setTextFont(6);
-    sprite.drawString(pm25str, 10, 67);
+    sprite.drawString(pm25str, 10, 85);
     
     sprite.setTextDatum(MR_DATUM);
     sprite.setTextFont(4);
     sprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    sprite.drawString("ug/m3", 230, 50);
+    sprite.drawString("ug/m3", 310, 55);
     
     sprite.setTextFont(2);
     sprite.setTextColor(color, TFT_BLACK);
-    sprite.drawString(getAirQuality(pmsData.pm2_5_atm), 230, 85);
+    sprite.drawString(getAirQuality(calibratedPM25), 310, 90);
     
     sprite.setTextFont(1);
     sprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    sprite.drawString(lastSuccessSend, 230, 105);
+    sprite.drawString(lastSuccessSend, 310, 115);
   }
-  // รอข้อมูล
   else {
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_WHITE, TFT_BLACK);
     sprite.setTextFont(2);
-    sprite.drawString("Waiting for data...", 120, 67);
+    if (!pmsConnected) {
+      sprite.drawString("System Running", 160, 70);
+      sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+      sprite.drawString("No Sensor Data", 160, 100);
+    } else {
+      sprite.drawString("Waiting for data...", 160, 85);
+    }
   }
   
-  // Status indicators (ทุกกรณี)
   sprite.setTextDatum(TR_DATUM);
   sprite.setTextFont(1);
   sprite.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  sprite.drawString(wifiConnected ? "WiFi OK" : "No WiFi", 235, 5);
+  sprite.drawString(wifiConnected ? "WiFi OK" : "No WiFi", 315, 5);
   
   sprite.setTextColor(getBatteryColor(batteryPercent), TFT_BLACK);
   char battStr[32];
   snprintf(battStr, sizeof(battStr), "Batt: %d%% %.2fV%s",
            batteryPercent, batteryVoltage, usbMode ? " CHG" : "");
-  sprite.drawString(battStr, 235, 15);
+  sprite.drawString(battStr, 315, 15);
   
   if (lowBatteryWarn) {
     sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
-    sprite.drawString("Battery Low!", 235, 25);
+    sprite.drawString("Battery Low!", 315, 25);
   } else {
+    unsigned long elapsed = (millis() - systemWakeTime) / 1000;
+    unsigned long remaining = (AUTO_SLEEP_TIME / 1000) - elapsed;
+    char countdown[16];
+    snprintf(countdown, sizeof(countdown), "Sleep in %lus", remaining);
     sprite.setTextColor(TFT_CYAN, TFT_BLACK);
-    sprite.drawString("Press to Sleep", 235, 25);
-  }
-  
-  // Auto-sleep countdown (ถ้าใกล้จะ sleep)
-  if (systemWakeTime > 0) {
-    unsigned long awakeTime = millis() - systemWakeTime;
-    if (awakeTime > (AUTO_SLEEP_TIME - 10000)) {  // แสดง 10 วินาทีสุดท้าย
-      unsigned long remainingSec = (AUTO_SLEEP_TIME - awakeTime) / 1000;
-      sprite.setTextDatum(BC_DATUM);
-      sprite.setTextFont(1);
-      sprite.setTextColor(TFT_ORANGE, TFT_BLACK);
-      char sleepMsg[32];
-      snprintf(sleepMsg, sizeof(sleepMsg), "Auto sleep in %lus", remainingSec);
-      sprite.drawString(sleepMsg, 120, 134);
-    }
+    sprite.drawString(countdown, 315, 25);
   }
   
   sprite.setTextDatum(TL_DATUM);
   sprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
   sprite.drawString(DEVICE_NAME, 5, 5);
   
-  if (!wifiConnected && pmsWarmedUp) {
+  if (!wifiConnected) {
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_RED, TFT_BLACK);
     sprite.setTextFont(2);
-    sprite.drawString("OFFLINE MODE", 120, 110);
+    sprite.drawString("OFFLINE MODE", 160, 120);
   }
   
   sprite.pushSprite(0, 0);
-  Serial.println("DEBUG: Display updated");
 }
 
 // ===================== Setup =====================
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n=== PMS9103M + Enhanced Battery Protection System ===");
-  Serial.printf("Battery thresholds: WARN=%.2fV, CUTOFF=%.2fV, CRITICAL=%.2fV, RECOVER=%.2fV\n",
-                VBAT_WARN, VBAT_CUTOFF, VBAT_CRITICAL, VBAT_RECOVER);
+  delay(2000);
   
-  // Check wakeup reason first
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   
-  // ADC init
+  Serial.println("[BOOT] ADC init...");
   analogReadResolution(12);
-  analogSetPinAttenuation(PIN_VBAT, ADC_11db);
-  esp_adc_cal_characterize(ADC_UNIT_1, CAL_ATTEN, ADC_WIDTH_BIT_12, VREF_mV, &adc_chars);
-  
-  // Read battery immediately
+  analogSetAttenuation(ADC_11db);
+  // esp_adc_cal_characterize(ADC_UNIT_1, CAL_ATTEN, ADC_WIDTH_BIT_12, VREF_mV, &adc_chars);
+
+  Serial.println("[BOOT] Reading battery...");
   readBattery();
-  Serial.printf("DEBUG: Initial battery reading: %.2fV (%d%%)\n", batteryVoltage, batteryPercent);
+  Serial.printf("[BOOT] Battery: %.2fV %d%% USB=%d\n", batteryVoltage, batteryPercent, usbMode);
+
+  if (batteryVoltage < 3.0f || batteryVoltage > 5.0f) {
+    Serial.println("[BOOT] WARNING: Abnormal battery reading, assuming charging");
+    usbMode = true;
+    batteryVoltage = 4.20f;
+    batteryPercent = 100;
+  }
+
+  if (!usbMode && batteryVoltage <= VBAT_CRITICAL) {
+    Serial.println("[BOOT] CRITICAL BATTERY - entering ultra low power mode");
+    enterUltraLowPowerMode();
+    return;
+  }
   
-  // Initialize display first for messages
+  pinMode(DISPLAY_POWER_PIN, OUTPUT);
+  digitalWrite(DISPLAY_POWER_PIN, HIGH);
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, LOW);
+
+  Serial.println("[BOOT] Display init...");
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-  sprite.createSprite(240, 135);
+  sprite.createSprite(320, 170);
   sprite.fillSprite(TFT_BLACK);
+  Serial.println("[BOOT] Display OK");
   
-  // Handle different wakeup scenarios
   switch(wakeup_reason) {
     case ESP_SLEEP_WAKEUP_TIMER:
-      Serial.println("DEBUG: Wakeup by timer - checking battery");
-      
-      // If still low battery and not charging, go back to sleep
       if (!usbMode && batteryVoltage < VBAT_RECOVER) {
-        Serial.printf("DEBUG: Battery still low: %.2fV < %.2fV\n", batteryVoltage, VBAT_RECOVER);
-        
-        // Show brief status
         digitalWrite(TFT_BL, HIGH);
         sprite.fillSprite(TFT_BLACK);
         sprite.setTextDatum(MC_DATUM);
         sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
         sprite.setTextFont(2);
-        sprite.drawString("Battery Check", 120, 40);
+        sprite.drawString("Battery Check", 160, 50);
         char vbuf[32];
         snprintf(vbuf, sizeof(vbuf), "%.2fV (%d%%)", batteryVoltage, batteryPercent);
-        sprite.drawString(vbuf, 120, 67);
-        sprite.drawString("Still too low", 120, 94);
+        sprite.drawString(vbuf, 160, 80);
+        sprite.drawString("Still too low", 160, 110);
         sprite.pushSprite(0, 0);
         delay(1000);
         digitalWrite(TFT_BL, LOW);
         
-        // Go back to deep sleep
         if (batteryVoltage <= VBAT_CRITICAL) {
-          enterDeepSleep(true);  // Ultra low power
+          enterDeepSleep(true);
         } else {
-          enterDeepSleep(false); // Normal battery check interval
+          enterDeepSleep(false);
         }
-        return;  // Should not reach here
+        return;
       }
-      
-      // Battery recovered or charging - continue boot
-      Serial.println("DEBUG: Battery OK or charging - continuing boot");
       break;
       
     case ESP_SLEEP_WAKEUP_EXT1:
-      Serial.println("DEBUG: Wakeup by button press");
-      
-      // Check if battery is too low to operate
       if (!usbMode && batteryVoltage < VBAT_CUTOFF) {
-        Serial.printf("DEBUG: Battery too low for operation: %.2fV\n", batteryVoltage);
-        
-        // Show warning
         digitalWrite(TFT_BL, HIGH);
         drawCriticalBatteryScreen();
         delay(3000);
         digitalWrite(TFT_BL, LOW);
         
-        // Go back to sleep
         if (batteryVoltage <= VBAT_CRITICAL) {
           enterDeepSleep(true);
         } else {
@@ -1057,74 +1078,86 @@ void setup() {
       break;
       
     default:
-      Serial.println("DEBUG: Normal boot or undefined wakeup");
-      
-      // Check battery on first boot
       if (!usbMode && batteryVoltage <= VBAT_CRITICAL) {
-        Serial.println("DEBUG: Initial boot with critical battery!");
         enterUltraLowPowerMode();
         return;
       }
       break;
   }
   
-  // If we get here, battery is OK to proceed
-  
-  // Buttons setup
   pinMode(BUTTON_1, INPUT_PULLUP);
   pinMode(BUTTON_2, INPUT_PULLUP);
   
-  // PMS setup
+  Serial.println("[BOOT] Serial init...");
   pmsSerial.begin(9600, SERIAL_8N1, PMS_RX_PIN, PMS_TX_PIN);
   pinMode(PMS_SET_PIN, OUTPUT);
   digitalWrite(PMS_SET_PIN, LOW);
-  
-  // Check PMS sensor if battery is OK
+
   if (!lowBatteryMode) {
+    Serial.println("[BOOT] Checking PMS sensor...");
     pmsConnected = checkPMSSensor();
     if (pmsConnected) {
-      digitalWrite(PMS_SET_PIN, LOW);  // Sleep initially
+      Serial.println("[BOOT] PMS sensor OK");
+      digitalWrite(PMS_SET_PIN, LOW);
+    } else {
+      Serial.println("[BOOT] PMS sensor NOT connected");
     }
   } else {
     pmsConnected = false;
   }
   
-  // Setup interrupts for normal operation
   attachInterrupt(digitalPinToInterrupt(BUTTON_1), buttonISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(BUTTON_2), buttonISR, FALLING);
   
-  Serial.println("DEBUG: Starting in SLEEP MODE");
-  Serial.println("DEBUG: Press button to wake up");
-  Serial.printf("DEBUG: Data send interval: %lu seconds\n", SEND_INTERVAL/1000);
-  Serial.println("========================\n");
+  // Automatically activate system on boot
+  systemActive = true;
+  displayOn = true;
+  systemWakeTime = millis();
   
-  systemActive = false;
-  displayOn = false;
+  // Display boot status
+  sprite.fillSprite(TFT_BLACK);
+  sprite.setTextDatum(MC_DATUM);
+  sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  sprite.setTextFont(2);
+  sprite.drawString("System Booting...", 160, 50);
+  sprite.pushSprite(0, 0);
+  
+  // Connect WiFi on boot
+  connectWiFi();
+  if (wifiConnected) {
+    syncTime();
+  }
+  
+  // Start sensor if connected
+  if (pmsConnected) {
+    digitalWrite(PMS_SET_PIN, HIGH);
+    pmsWarmupStart = millis();
+    pmsWarmedUp = false;
+    waitingForWarmup = true;
+  }
+  
+  dataReady = false;
+  bufferIndex = 0;
 }
 
 // ===================== Main Loop =====================
 void loop() {
   handleButtonPress();
   
-  // Battery monitoring every 5 seconds
   static unsigned long lastBattRefresh = 0;
   if (millis() - lastBattRefresh >= 5000) {
     readBattery();
     
-    // Check for critical battery during operation
     if (!usbMode && batteryVoltage <= VBAT_CRITICAL) {
-      Serial.println("CRITICAL: Battery dropped below critical level during operation!");
       enterUltraLowPowerMode();
       return;
     }
     
-    // Check for low battery mode transitions
     if (!lowBatteryMode && batteryVoltage <= VBAT_CUTOFF && !usbMode) {
       forceLowBatterySafeState();
       return;
     }
     
-    // Check for recovery
     if (lowBatteryMode && (batteryVoltage >= VBAT_RECOVER || usbMode)) {
       maybeExitLowBatterySafeState();
     }
@@ -1133,21 +1166,16 @@ void loop() {
   }
   
   if (systemActive) {
-    // Check for auto-sleep after 2 minutes
     if (systemWakeTime > 0 && (millis() - systemWakeTime >= AUTO_SLEEP_TIME)) {
-      Serial.println("DEBUG: Auto-sleep after 2 minutes of activity");
       enterSleepMode();
       return;
     }
     
-    // Check PMS warmup status
     if (waitingForWarmup && !pmsWarmedUp) {
       if (millis() - pmsWarmupStart >= PMS_WARMUP_TIME) {
         pmsWarmedUp = true;
         waitingForWarmup = false;
-        Serial.println("DEBUG: PMS warmup complete - starting normal operation");
         
-        // Clear any buffered data during warmup
         while (pmsSerial.available()) {
           pmsSerial.read();
         }
@@ -1156,7 +1184,6 @@ void loop() {
       }
     }
     
-    // Don't operate in low battery mode
     if (lowBatteryMode) {
       if (millis() - lastUpdate >= 3000) {
         updateDisplay();
@@ -1166,22 +1193,32 @@ void loop() {
       return;
     }
     
-    // Normal operation - read PMS if warmed up
     if (pmsConnected) {
       readPMSSensor();
     }
-    
-    // Update display more frequently during warmup (every second)
-    // Normal update every 5 seconds after warmup
+
+    if (pmsConnected && dataReady && !waitingForWarmup && pmsWarmedUp) {
+      static uint16_t lastRawPM25 = 0xFFFF;
+      static uint16_t lastRawPM10 = 0xFFFF;
+      static bool lastPrinted = false;
+      if (!lastPrinted || pmsData.pm2_5_atm != lastRawPM25 || pmsData.pm10_atm != lastRawPM10) {
+        Serial.printf("[PM_DATA] PM2.5 raw=%d -> cal=%d | PM10 raw=%d -> cal=%d\n",
+                      pmsData.pm2_5_atm, getCalibratedPM25(),
+                      pmsData.pm10_atm, getCalibratedPM10());
+        lastRawPM25 = pmsData.pm2_5_atm;
+        lastRawPM10 = pmsData.pm10_atm;
+        lastPrinted = true;
+      }
+    }
+
     unsigned long displayInterval = (waitingForWarmup && !pmsWarmedUp) ? 1000 : 5000;
     if (millis() - lastUpdate >= displayInterval) {
       updateDisplay();
       lastUpdate = millis();
     }
     
-    // Send telemetry (only if warmed up and have data)
-    if (pmsWarmedUp && millis() - lastTelemetry >= SEND_INTERVAL) {
-      sendToThingsBoard();
+    if (millis() - lastTelemetry >= SEND_INTERVAL) {
+      sendToGistNorth();
       lastTelemetry = millis();
     }
   }
