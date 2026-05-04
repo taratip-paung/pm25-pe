@@ -6,6 +6,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <WiFiManager.h>
 #include <time.h>
 #include "esp_adc_cal.h"
 #include "esp_sleep.h"
@@ -15,8 +16,11 @@
 #include "driver/rtc_io.h"
 
 // ===================== Buttons =====================
-#define BUTTON_1 14  // T-Display S3 onboard button (GPIO14)
-#define BUTTON_2 0   // BOOT button (GPIO0)
+#define BUTTON_1 0   // BOOT button (GPIO0)
+
+// ===================== Gate Control =====================
+#define GATE_PIN 14  // GPIO14 for gate control (open/close)
+bool gateOpen = false;
 
 // *** Deep sleep wake ***
 #define WAKE_MASK  (1ULL << GPIO_NUM_0)
@@ -47,9 +51,10 @@ static constexpr adc_atten_t CAL_ATTEN = ADC_ATTEN_DB_12;
 #define BATTERY_CHECK_INTERVAL_US  (30 * 60 * 1000000ULL)  // 30 นาที
 #define ULTRA_LOW_POWER_INTERVAL_US (60 * 60 * 1000000ULL)  // 60 นาที
 
-// ===================== WiFi =====================
-const char* WIFI_SSID = "KHomeSmart-IOT";
-const char* WIFI_PASSWORD = "nongnoom";
+// ===================== WiFi Manager =====================
+#define WIFI_AP_NAME     "PM25-PE-Setup"
+#define WIFI_AP_PASSWORD "12345678"
+#define CONFIG_PORTAL_TIMEOUT  180
 
 // ===================== GIST North API =====================
 const char* GIST_SERVER = "app.gistnorth.soc.cmu.ac.th";
@@ -148,6 +153,8 @@ String lastSuccessSend = String("--");
 
 // ===================== Forward Declarations =====================
 void connectWiFi();
+void resetWiFiSettings();
+void configPortalCallback(WiFiManager *wm);
 void enterSleepMode();
 void wakeFromSleep();
 void syncTime();
@@ -173,6 +180,8 @@ void drawCriticalBatteryScreen();
 uint16_t calibratePM(uint16_t rawValue, float factor, float offset);
 uint16_t getCalibratedPM25();
 uint16_t getCalibratedPM10();
+void openGate();
+void closeGate();
 
 // ===================== PM Calibration Functions =====================
 uint16_t calibratePM(uint16_t rawValue, float factor, float offset) {
@@ -189,6 +198,19 @@ uint16_t getCalibratedPM25() {
 
 uint16_t getCalibratedPM10() {
   return calibratePM(pmsData.pm10_atm, PM10_CALIBRATION_FACTOR, PM10_CALIBRATION_OFFSET);
+}
+
+// ===================== Gate Control Functions =====================
+void openGate() {
+  digitalWrite(GATE_PIN, HIGH);
+  gateOpen = true;
+  Serial.println("[GATE] Gate OPENED");
+}
+
+void closeGate() {
+  digitalWrite(GATE_PIN, LOW);
+  gateOpen = false;
+  Serial.println("[GATE] Gate CLOSED");
 }
 
 // ===================== Battery Reading Functions =====================
@@ -294,11 +316,12 @@ void shutdownAllPeripherals() {
     if (i == 0 || i == 3 || i == 45 || i == 46) continue;
     if (i == 19 || i == 20) continue;
     if (i >= 26 && i <= 37) continue;
-    if (i == BUTTON_2 || i == BUTTON_1) continue;
+    if (i == BUTTON_2) continue;
     if (i == 5 || i == 6 || i == 7 || i == 8 || i == 9) continue;
     if (i >= 39 && i <= 48) continue;
     if (i == 15 || i == 38) continue;
     if (i == PMS_RX_PIN || i == PMS_TX_PIN || i == PMS_SET_PIN) continue;
+    if (i == GATE_PIN) continue;
     pinMode(i, INPUT);
   }
   
@@ -602,36 +625,69 @@ void readPMSSensor() {
 }
 
 // ===================== WiFi Functions =====================
-void connectWiFi() {
-  if (lowBatteryMode) return;
-  
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
+void resetWiFiSettings() {
+  WiFiManager wm;
+  wm.resetSettings();
+  Serial.println("[WIFI] All WiFi settings reset!");
+}
+
+void configPortalCallback(WiFiManager *wm) {
+  Serial.println("[WIFI] Config portal started!");
+  Serial.printf("[WIFI] Connect to AP: %s (pass: %s)\n", WIFI_AP_NAME, WIFI_AP_PASSWORD);
+  Serial.printf("[WIFI] Portal IP: %s\n", WiFi.softAPIP().toString().c_str());
+
   sprite.fillSprite(TFT_BLACK);
   sprite.setTextDatum(MC_DATUM);
   sprite.setTextColor(TFT_CYAN, TFT_BLACK);
   sprite.setTextFont(2);
-  sprite.drawString("Connecting WiFi...", 160, 65);
-  sprite.setTextDatum(TL_DATUM);
+  sprite.drawString("WiFi Setup Mode", 160, 20);
+
   sprite.setTextColor(TFT_WHITE, TFT_BLACK);
   sprite.setTextFont(1);
-  char ssidMsg[64];
-  snprintf(ssidMsg, sizeof(ssidMsg), "SSID: %s", WIFI_SSID);
-  sprite.drawString(ssidMsg, 5, 135);
+  sprite.drawString("1. Connect to WiFi:", 160, 50);
+  sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+  sprite.setTextFont(2);
+  sprite.drawString(WIFI_AP_NAME, 160, 70);
+
+  sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  sprite.setTextFont(1);
+  sprite.drawString("2. Password:", 160, 95);
+  sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+  sprite.drawString(WIFI_AP_PASSWORD, 160, 112);
+
+  sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  sprite.setTextFont(1);
+  sprite.drawString("3. Open browser & select WiFi", 160, 135);
+
+  sprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  char portalInfo[48];
+  snprintf(portalInfo, sizeof(portalInfo), "Timeout: %ds", CONFIG_PORTAL_TIMEOUT);
+  sprite.drawString(portalInfo, 160, 158);
+
   sprite.pushSprite(0, 0);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    attempts++;
-    Serial.printf("[WIFI] Attempt %d/20\n", attempts);
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
+}
+
+void connectWiFi() {
+  if (lowBatteryMode) return;
+
+  WiFiManager wm;
+
+  wm.setConfigPortalTimeout(CONFIG_PORTAL_TIMEOUT);
+  wm.setConnectTimeout(10);
+  wm.setDebugOutput(true);
+  wm.setAPCallback(configPortalCallback);
+
+  sprite.fillSprite(TFT_BLACK);
+  sprite.setTextDatum(MC_DATUM);
+  sprite.setTextColor(TFT_CYAN, TFT_BLACK);
+  sprite.setTextFont(2);
+  sprite.drawString("Starting WiFi...", 160, 85);
+  sprite.pushSprite(0, 0);
+
+  if (wm.autoConnect(WIFI_AP_NAME, WIFI_AP_PASSWORD)) {
     wifiConnected = true;
     Serial.printf("[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-    
+
     sprite.fillSprite(TFT_BLACK);
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -644,18 +700,20 @@ void connectWiFi() {
     delay(1000);
   } else {
     wifiConnected = false;
-    Serial.println("[WIFI] Connection failed!");
-    
+    Serial.println("[WIFI] Connection failed / config portal timeout!");
+
     sprite.fillSprite(TFT_BLACK);
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(TFT_RED, TFT_BLACK);
     sprite.setTextFont(3);
-    sprite.drawString("WiFi FAILED", 160, 50);
-    sprite.setTextFont(1);
-    sprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    sprite.drawString("Will continue offline", 160, 85);
+    sprite.drawString("WiFi FAILED", 160, 40);
+    sprite.setTextFont(2);
+    sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+    sprite.drawString("Hold BOOT button", 160, 80);
+    sprite.drawString("on next boot to", 160, 105);
+    sprite.drawString("reconfigure WiFi", 160, 130);
     sprite.pushSprite(0, 0);
-    delay(1000);
+    delay(3000);
   }
 }
 
@@ -1027,6 +1085,10 @@ void setup() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, LOW);
 
+  pinMode(GATE_PIN, OUTPUT);
+  digitalWrite(GATE_PIN, LOW);
+  Serial.println("[BOOT] Gate initialized (CLOSED)");
+
   Serial.println("[BOOT] Display init...");
   tft.init();
   tft.setRotation(1);
@@ -1085,9 +1147,30 @@ void setup() {
       break;
   }
   
-  pinMode(BUTTON_1, INPUT_PULLUP);
   pinMode(BUTTON_2, INPUT_PULLUP);
-  
+
+  pinMode(BUTTON_1, INPUT_PULLUP);
+  if (digitalRead(BUTTON_1) == LOW) {
+    delay(50);
+    if (digitalRead(BUTTON_1) == LOW) {
+      Serial.println("[BOOT] BOOT button held - Resetting WiFi settings...");
+
+      sprite.fillSprite(TFT_BLACK);
+      sprite.setTextDatum(MC_DATUM);
+      sprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+      sprite.setTextFont(2);
+      sprite.drawString("WiFi Reset!", 160, 65);
+      sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+      sprite.setTextFont(1);
+      sprite.drawString("Saved WiFi cleared", 160, 95);
+      sprite.drawString("Config portal will start", 160, 110);
+      sprite.pushSprite(0, 0);
+
+      resetWiFiSettings();
+      delay(2000);
+    }
+  }
+
   Serial.println("[BOOT] Serial init...");
   pmsSerial.begin(9600, SERIAL_8N1, PMS_RX_PIN, PMS_TX_PIN);
   pinMode(PMS_SET_PIN, OUTPUT);
@@ -1105,8 +1188,7 @@ void setup() {
   } else {
     pmsConnected = false;
   }
-  
-  attachInterrupt(digitalPinToInterrupt(BUTTON_1), buttonISR, FALLING);
+
   attachInterrupt(digitalPinToInterrupt(BUTTON_2), buttonISR, FALLING);
   
   // Automatically activate system on boot
