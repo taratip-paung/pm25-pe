@@ -8,16 +8,18 @@
 
 - วัดฝุ่นละออง **PM1.0, PM2.5, PM10** ด้วยเซ็นเซอร์เลเซอร์ PMS9103M
 - แสดงผลค่า PM2.5 แบบเรียลไทม์พร้อม **ระดับสี** ตามมาตรฐานคุณภาพอากาศ บนจอ **1.9 นิ้ว ST7789 170x320**
-- ส่งข้อมูลไปยัง **GIST North IoT API** ผ่าน HTTPS ทุก 1 วินาที
+- ส่งข้อมูลไปยัง **GIST North IoT API** ผ่าน HTTPS ทุก 3 วินาที
 - ระบบ **จัดการพลังงานแบตเตอรี่** แบบหลายระดับ (Warning → Safe Mode → Critical → Ultra Low Power)
 - วัดแรงดันแบตเตอรี่ผ่าน ADC + Voltage Divider พร้อมแสดง % และสถานะชาร์จ
 - **Auto Sleep หลัง 1 นาที** - ระบบจะเข้า Sleep Mode อัตโนมัติหลัง 60 วินาที
-- **กดปุ่ม GPIO 14 เพื่อ Wake** - กดปุ่ม onboard (GPIO 14) เพื่อกลับมาทำงานจาก Sleep Mode
+- **กดปุ่ม BOOT (GPIO 0) เพื่อ Sleep/Wake** - กดปุ่ม BOOT เพื่อเปลี่ยนสถานะ Active/Sleep
+- **ระบบ WiFi Manager** - ตั้งค่า WiFi ผ่าน Config Portal แบบง่ายๆ
 - **Deep Sleep เมื่อแบตวิกฤต** - ป้องกันแบตเตอรี่หมดเกินไป
 - ซิงค์เวลาผ่าน **NTP** (UTC+7)
 - แจ้งเตือนเมื่อแบตเตอรี่ต่ำ / ไม่มี WiFi / ไม่พบเซ็นเซอร์
 - **Offline Mode** - ทำงานได้แม้ไม่มี WiFi (แสดงข้อความ "OFFLINE MODE")
 - **Sleep Mode** - กดปุ่มเพื่อปิดเซ็นเซอร์และ WiFi (ประหยัดพลังงาน)
+- **ระบบปรับค่า PM (Calibration)** - ปรับค่า PM2.5 และ PM10 ผ่าน factor และ offset
 
 ---
 
@@ -52,8 +54,13 @@
 
 | ฟังก์ชัน | GPIO | หมายเหตุ |
 |----------|------|---------|
-| ปุ่มกด (onboard) | **GPIO 14** | เปลี่ยน Active/Sleep mode |
-| ปุ่มกด (BOOT) | **GPIO 0** | Deep Sleep Wake Source |
+| BOOT Button (Onboard) | **GPIO 0** | Sleep/Wake, Reset WiFi (ถ้ากดค้างตอนบูต) |
+
+### Gate Control
+
+| ฟังก์ชัน | GPIO | หมายเหตุ |
+|----------|------|---------|
+| Gate Control | **GPIO 14** | HIGH = เปิดประตู, LOW = ปิดประตู |
 
 ### Display (ST7789 - 8-bit Parallel)
 
@@ -76,10 +83,11 @@
 
 ### ไลบรารีที่ใช้
 
-| ไลบรารี | เวอร์ชัน | 用途 |
+| ไลบรารี | เวอร์ชัน | วัตถุประสงค์ |
 |---------|---------|------|
 | [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) | ^2.5.43 | ควบคุมจอ TFT ST7789 (8-bit Parallel) |
 | [ArduinoJson](https://github.com/bblanchon/ArduinoJson) | ^6.21.3 | สร้าง JSON payload สำหรับ GIST North API |
+| [WiFiManager](https://github.com/tzapu/WiFiManager.git) | Latest | ตั้งค่า WiFi ผ่าน Config Portal |
 
 ---
 
@@ -106,40 +114,67 @@ upload_port = COM8    # เปลี่ยน COM port ที่ต้องก�
 monitor_port = COM8   # เปลี่ยน COM port ที่ต้องการ
 ```
 
-### 3. แก้ไขการตั้งค่า
+### 3. การตั้งค่า WiFi
 
-แก้ไขค่า config ในไฟล์ `src/main.cpp` ก่อน upload:
+ระบบใช้ **WiFiManager** สำหรับการตั้งค่า WiFi โดยไม่ต้องแก้ไขโค้ด:
+
+- **การตั้งค่าครั้งแรก:**
+  1. เปิดอุปกรณ์
+  2. ระบบจะสร้าง WiFi Access Point ชื่อ `PM25-PE-Setup`
+  3. เชื่อมต่อ WiFi ด้วยรหัส `12345678`
+  4. เปิด browser และเลือก WiFi network ที่ต้องการ
+  5. ใส่รหัส WiFi และบันทึก
+
+- **รีเซ็ต WiFi:**
+  - กดปุ่ม **BOOT** ค้างระหว่างบูต เพื่อล้างการตั้งค่า WiFi ที่บันทึกไว้
+
+### 4. การตั้งค่า API
+
+แก้ไขค่า GIST North API ในไฟล์ `src/main.cpp`:
 
 ```cpp
-// WiFi
-const char* WIFI_SSID = "ชื่อWiFiของคุณ";
-const char* WIFI_PASSWORD = "รหัสWiFi";
-
-// GIST North API
 const char* GIST_SERVER = "app.gistnorth.soc.cmu.ac.th";
-const char* GIST_TOKEN  = "Tokenของอุปกรณ์คุณ";
+const char* GIST_TOKEN  = "dust_c9230016d168863c7fe1c479ef8e09889c935e923c91e759";
 const char* GIST_PATH   = "/iot/api/ingest";
 const char* DEVICE_NAME = "PM25-PE-2";
 ```
 
-> **สำคัญ:** อย่า commit credentials จริงลง public repository
+> **สำคัญ:** อย่า commit Token จริงลง public repository
+
+### 5. การปรับค่า PM (Calibration)
+
+แก้ไขค่า calibration ในไฟล์ `src/main.cpp`:
+
+```cpp
+// PM2.5 Calibration Parameters
+#define PM25_CALIBRATION_FACTOR    1.0f    // ค่าคูณ (ปกติ = 1.0)
+#define PM25_CALIBRATION_OFFSET    0.0f    // ค่าบวก/ลบ (ปกติ = 0)
+
+// PM10 Calibration Parameters
+#define PM10_CALIBRATION_FACTOR    1.0f    // ค่าคูณ (ปกติ = 1.0)
+#define PM10_CALIBRATION_OFFSET    0.0f    // ค่าบวก/ลบ (ปกติ = 0)
+```
+
+สูตร: `ค่าปรับ = (ค่าดิบ × Factor) + Offset`
 
 ---
 
 ## การทำงานของระบบ
 
 ระบบทำงานแบบ **Active → Auto Sleep → Wake** เมื่อเปิดเครื่อง:
-- เชื่อมต่อ WiFi และซิงค์เวลา NTP
+- เชื่อมต่อ WiFi (ผ่าน WiFiManager) และซิงค์เวลา NTP
 - เปิดเซ็นเซอร์ PMS และรอ warm-up 30 วินาที
 - อ่านค่า PM ทุก 3 วินาที
 - ส่งข้อมูลไป GIST North API ทุก 3 วินาที
 - แสดง PMS HEX raw data บน Serial Monitor ทุกครั้งที่ส่ง API
 - ตรวจสอบแบตเตอรี่ทุก 5 วินาที
-- **แสดง countdown "Sleep in Xs"** บนหน้าจอ
+- อัพเดทจอทุก 5 วินาที (หรือ 1 วินาทีในช่วง warmup)
+- แสดง countdown "Sleep in Xs" บนหน้าจอ
 - **Auto Sleep หลัง 1 นาที (60 วินาที)**
 
 **การควบคุมระบบ:**
-- ปุ่ม **GPIO 14 (onboard button)** → กดเพื่อ **Wake** จาก Sleep Mode
+- ปุ่ม **BOOT (GPIO 0)** → กดเพื่อ **Sleep/Wake**
+- ปุ่ม **BOOT (ค้างตอนบูต)** → **รีเซ็ต WiFi**
 - ระบบจะเข้า Sleep Mode อัตโนมัติหลังจาก Active ไป 1 นาที
 
 **Deep Sleep เมื่อแบตวิกฤต:**
@@ -190,8 +225,9 @@ monitor_port = COM8         # COM port สำหรับ monitor
 **Library Dependencies:**
 ```ini
 lib_deps =
-  bodmer/TFT_eSPI @ ^2.5.43      # ไลบรารีจอ TFT
-  bblanchon/ArduinoJson @ ^6.21.3 # ไลบรารี JSON
+  bodmer/TFT_eSPI @ ^2.5.43           # ไลบรารีจอ TFT
+  bblanchon/ArduinoJson @ ^6.21.3     # ไลบรารี JSON
+  https://github.com/tzapu/WiFiManager.git  # WiFi Manager
 ```
 
 ### ระดับแบตเตอรี่
@@ -214,9 +250,9 @@ lib_deps =
 ```cpp
 const unsigned long SEND_INTERVAL = 3000;        // ส่งข้อมูลทุก 3 วินาที
 const unsigned long PMS_WARMUP_TIME = 30000;     // รอ warmup เซ็นเซอร์ 30 วินาที
-const unsigned long PMS_READ_INTERVAL = 3000;    // อ่านเซ็นเซอร์ทุก 3 วินาที (หลัง warmup)
+const unsigned long PMS_READ_INTERVAL = 3000;   // อ่านเซ็นเซอร์ทุก 3 วินาที (หลัง warmup)
 const unsigned long BATTERY_CHECK_INTERVAL = 5000; // ตรวจสอบแบตทุก 5 วินาที
-const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 นาที (60 วินาที)
+const unsigned long AUTO_SLEEP_TIME = 60000;   // Auto sleep หลัง 1 นาที (60 วินาที)
 ```
 
 **Deep Sleep Timer:**
@@ -225,10 +261,11 @@ const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 �
 #define ULTRA_LOW_POWER_INTERVAL_US (60 * 60 * 1000000ULL)  // 60 นาที (Critical Mode)
 ```
 
-**WiFi Connection:**
+**WiFi Manager Config:**
 ```cpp
-// รอ connection สูงสุด 20 attempts (10 วินาที)
-// ถ้าไม่สามารถเชื่อมต่อได้ จะทำงานใน Offline Mode
+#define WIFI_AP_NAME     "PM25-PE-Setup"
+#define WIFI_AP_PASSWORD "12345678"
+#define CONFIG_PORTAL_TIMEOUT  180  // 3 นาที
 ```
 
 ---
@@ -238,7 +275,8 @@ const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 �
 ```
 ┌─────────────────┐
 │  Power On Boot  │
-│  + WiFi + NTP   │
+│  + WiFi Manager │
+│  + NTP Sync     │
 │  + Sensor Init  │
 └────────┬────────┘
          │ 30s
@@ -252,7 +290,7 @@ const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 �
 ┌─────────────────┐
 │  Active Mode    │
 │  - อ่าน PM ทุก 3 วินาที  │
-│  - ส่ง API + แสดง HEX ทุก ~3 วินาที  │
+│  - ส่ง API + แสดง HEX ทุก 3 วินาที  │
 │  - อัพเดทจอทุก 5 วินาที  │
 │  - แสดง countdown "Sleep in Xs" │
 └────────┬────────┘
@@ -263,7 +301,7 @@ const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 �
 │  (ปิดเซ็นเซอร์ + WiFi) │
 └────────┬────────┘
          │
-         ├─ กด GPIO 14 → Wake (กลับ Active)
+         ├─ กด BOOT → Wake (กลับ Active)
          │
          └─ ตรวจแบตทุก 5 วินาที
              ├─ Warning (< 3.60V)   → แจ้งเตือนหน้าจอ, ทำงานต่อ
@@ -292,13 +330,15 @@ const unsigned long AUTO_SLEEP_TIME = 60000;      // Auto sleep หลัง 1 �
 PE_PMS9103M-2/
 ├── platformio.ini          # การตั้งค่า PlatformIO + Build Flags (TFT + WiFi + Upload)
 ├── src/
-│   └── main.cpp            # โค้ดหลักทั้งหมด (~1148 บรรทัด)
+│   └── main.cpp            # โค้ดหลักทั้งหมด (~1309 บรรทัด)
 │                           # - Battery Management (Voltage ADC, SOC, Protection)
 │                           # - PMS9103M Sensor (UART, Data Processing)
-│                           # - WiFi & NTP (Connection, Time Sync)
+│                           # - WiFi & NTP (WiFiManager, Time Sync)
 │                           # - Display (TFT_eSPI, UI, Air Quality Colors)
 │                           # - GIST North API (HTTPS, JSON Payload)
 │                           # - Deep Sleep (Battery Protection, Wake Sources)
+│                           # - PM Calibration (Factor, Offset)
+│                           # - Gate Control (GPIO 14)
 ├── lib/
 │   └── TFT_eSPI/
 │       └── User_Setup.h    # TFT configuration (ถูก override โดย platformio.ini)
@@ -322,22 +362,25 @@ PE_PMS9103M-2/
 **Payload:**
 ```json
 {
-  "pm25": 19,
-  "pm10": 21
+  "pm25": 19.0,
+  "pm25_raw": 18.0,
+  "pm10": 21.0,
+  "pm10_raw": 20.0
 }
 ```
 
 **Serial Monitor Output (แสดงพร้อม API):**
 ```
+[CALIBRATE] PM2.5 raw=18 -> cal=18 | PM10 raw=20 -> cal=20
 [PMS HEX] 42 4D 00 1C 00 0E 00 13 00 14 00 0E 00 13 00 14 01 5A 00 EB 00 5B 00 2E 00 0E 00 04 00 02 01 AB
-[29/04 14:18] SEND -> app.gistnorth.soc.cmu.ac.th | pm25=19.0 pm10=21.0 | RESPONSE: 200
+[29/04 14:18] SEND -> app.gistnorth.soc.cmu.ac.th | pm25=18.0 (raw=18.0) pm10=20.0 (raw=20.0) | RESPONSE: 200
 ```
 
 **สถานะการส่ง:**
 - **Online Mode:** ส่งข้อมูลทุก 3 วินาที หาก WiFi เชื่อมต่อ
 - **Offline Mode:** ไม่ส่งข้อมูล แสดง "OFFLINE MODE" บนหน้าจอ
 - **Low Battery Mode:** ปิด WiFi, ไม่ส่งข้อมูล
-- **Sensor Disconnected:** ส่ง pm25 = 0, pm10 = 0
+- **Sensor Disconnected:** ส่ง pm25 = 0, pm25_raw = 0, pm10 = 0, pm10_raw = 0
 
 > **หมายเหตุ:** ค่า `temp` และ `rh` ไม่ได้ส่ง เนื่องจากอุปกรณ์ไม่มีเซ็นเซอร์วัด หากต้องการเพิ่มเซ็นเซอร์ DHT22 หรือ BME280 สามารถแก้ไขโค้ดใน `sendToGistNorth()` ได้
 
@@ -359,19 +402,26 @@ PE_PMS9103M-2/
 - ดู Serial Monitor สำหรับข้อความ "PMS sensor NOT connected"
 
 ### WiFi เชื่อมต่อไม่ได้
-- ตรวจสอบ SSID และ PASSWORD ในโค้ด (src/main.cpp:51-52)
+- รอให้ Config Portal เปิดขึ้น (หลังบูต)
+- เชื่อมต่อ WiFi: `PM25-PE-Setup` ด้วยรหัส `12345678`
+- เปิด browser และตั้งค่า WiFi ผ่าน Config Portal
 - ตรวจสอบว่า router รองรับ 2.4GHz (ESP32 ไม่รองรับ 5GHz)
-- รอสูงสุด 10 วินาทีสำหรับการเชื่อมต่อ
+- รีเซ็ต WiFi โดยกดปุ่ม BOOT ค้างตอนบูต
 
 ### อ่านค่าแบตเตอรี่ไม่ถูกต้อง
-- ปรับค่า `CAL` (line 34) ใน main.cpp
-- ตรวจสอบค่า `DIVIDER` (line 32) ให้ตรงกับวงจรจริง
+- ปรับค่า `CAL` (line 38) ใน main.cpp
+- ตรวจสอบค่า `DIVIDER` (line 36) ให้ตรงกับวงจรจริง
 - วัดด้วย DMM และเปรียบเทียบกับค่าที่อ่านได้
 
 ### Deep Sleep ไม่ทำงาน
 - ตรวจสอบว่า `RTC_SLOW_MEM` เปิดใช้งานใน deep sleep configuration
 - ตรวจสอบว่าไม่มี peripheral ที่ทำให้ตื่น (RTC_GPIO)
 - ตรวจสอบ wiring ของปุ่มกด (BOOT button = GPIO 0)
+
+### ค่า PM ที่อ่านได้ไม่แม่นยำ
+- ใช้ฟีเจอร์ **PM Calibration** โดยปรับค่า `PM25_CALIBRATION_FACTOR` และ `PM25_CALIBRATION_OFFSET`
+- เปรียบเทียบค่าที่อ่านได้กับเครื่องวัดมาตรฐาน
+- สูตร: `ค่าปรับ = (ค่าดิบ × Factor) + Offset`
 
 ---
 
